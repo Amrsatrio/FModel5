@@ -1,0 +1,16 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{9FC8533E-4DEC-F998-907B-8FB9A33B77C2}",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "FModel",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"TargetPlatforms": [
+		"Win64"
+	]
+}
