@@ -3,6 +3,7 @@
 #include "FModelApp.h"
 #include "Brushes/SlateImageBrush.h"
 #include "Framework/Docking/TabManager.h"
+#include "HAL/FileManagerGeneric.h"
 #include "Internationalization/Regex.h"
 #include "Misc/FileHelper.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -182,7 +183,24 @@ TSharedRef<SMultiLineEditableTextBox> PopulateTabContents(const TSharedPtr<FFile
 {
 	check(Item->IsFile())
 	FString Result;
-	FFileHelper::LoadFileToString(Result, GPakPlatformFile, *Item->Path);
+
+	const TCHAR* Filename = *Item->Path;
+	if (IFileHandle* File = FFModelApp::Get().Provider->Read(Filename))
+	{
+		if (TUniquePtr<FArchive> Reader = MakeUnique<FArchiveFileReaderGeneric>(File, Filename, File->Size()))
+		{
+			FFileHelper::LoadFileToString(Result, *Reader.Get());
+		}
+		else
+		{
+			UE_LOG(LogStreaming, Warning, TEXT("Failed to read file '%s' error."), Filename);
+		}
+	}
+	else
+	{
+		UE_LOG(LogStreaming, Warning, TEXT("Failed to read file '%s' error."), Filename);
+	}
+
 	return SNew(SMultiLineEditableTextBox)
 		.Font(FCoreStyle::GetDefaultFontStyle("Mono", 10))
 		.Text(FText::FromString(Result));
@@ -222,21 +240,21 @@ void SMainWindow::Construct(const FArguments& Args)
 	TabManager = FGlobalTabmanager::Get()->NewTabManager(DockTab);
 	TSharedRef<FWorkspaceItem> AppMenuGroup = TabManager->AddLocalWorkspaceMenuCategory(INVTEXT("FModel"));
 
-	Options = {
-		MakeShared<FString>(TEXT("Single")),
-		MakeShared<FString>(TEXT("Multiple")),
-		MakeShared<FString>(TEXT("All")),
-		MakeShared<FString>(TEXT("All (New)")),
-		MakeShared<FString>(TEXT("All (Modified)")),
+	LoadingModeOptions = {
+		MakeShared<ELoadingMode>(ELoadingMode::Single),
+		MakeShared<ELoadingMode>(ELoadingMode::Multiple),
+		MakeShared<ELoadingMode>(ELoadingMode::All),
+		MakeShared<ELoadingMode>(ELoadingMode::AllButNew),
+		MakeShared<ELoadingMode>(ELoadingMode::AllButModified),
 	};
 
 	BuildArchivesList();
-	BuildFilesList();
 
 	TabManager->RegisterTabSpawner("Archives", FOnSpawnTab::CreateLambda([this](const FSpawnTabArgs& Args)
 	{
 		TSharedRef<SDockTab> Tab = SNew(SDockTab)
 			.Label(INVTEXT("Archives"))
+			.OnCanCloseTab_Lambda([] { return false; })
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
@@ -255,9 +273,19 @@ void SMainWindow::Construct(const FArguments& Args)
 					+ SHorizontalBox::Slot()
 					.FillWidth(1.0f)
 					[
-						SNew(STextComboBox)
-						.OptionsSource(&Options)
-						.InitiallySelectedItem(Options[2])
+						SAssignNew(ComboBox_LoadingMode, SComboBox<TSharedPtr<ELoadingMode>>)
+						.OptionsSource(&LoadingModeOptions)
+						.InitiallySelectedItem(LoadingModeOptions[2])
+						.OnGenerateWidget_Lambda([](TSharedPtr<ELoadingMode> InItem)
+						{
+							return SNew(STextBlock).Text(FText::FromString(LexToString(*InItem)));
+						})
+						[
+							SNew(STextBlock).Text_Lambda([this]
+							{
+								return FText::FromString(LexToString(*ComboBox_LoadingMode->GetSelectedItem()));
+							})
+						]
 					]
 				]
 				+ SVerticalBox::Slot()
@@ -267,18 +295,19 @@ void SMainWindow::Construct(const FArguments& Args)
 					SNew(SButton)
 					.HAlign(HAlign_Center)
 					.Text(INVTEXT("Load"))
-					.OnClicked_Lambda([]
+					.OnClicked_Lambda([this]
 					{
 						FAES::FAESKey Key;
 						HexToBytes(TEXT("DAE1418B289573D4148C72F3C76ABC7E2DB9CAA618A3EAF2D8580EB3A1BB7A63"), Key.Key);
 						FFModelApp::Get().Provider->SubmitKey(FGuid(), Key);
+						BuildFilesList();
 						return FReply::Handled();
 					})
 				]
 				+ SVerticalBox::Slot()
 				.FillHeight(1.0f)
 				[
-					SNew(SListView<TSharedPtr<FVfsEntry>>)
+					SAssignNew(List_Archives, SListView<TSharedPtr<FVfsEntry>>)
 					.ListItemsSource(&Archives)
 					.OnGenerateRow_Lambda([](TSharedPtr<FVfsEntry> InItem, const TSharedRef<STableViewBase>& InOwner) -> TSharedRef<ITableRow>
 					{
@@ -316,6 +345,7 @@ void SMainWindow::Construct(const FArguments& Args)
 	{
 		TSharedRef<SDockTab> Tab = SNew(SDockTab)
 			.Label(INVTEXT("Files"))
+			.OnCanCloseTab_Lambda([] { return false; })
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
@@ -327,7 +357,7 @@ void SMainWindow::Construct(const FArguments& Args)
 				+ SVerticalBox::Slot()
 				.FillHeight(1.0f)
 				[
-					SNew(STreeView<TSharedPtr<FFileTreeNode>>)
+					SAssignNew(Tree_Files, STreeView<TSharedPtr<FFileTreeNode>>)
 					.TreeItemsSource(Files.GetEntries())
 					.OnGenerateRow_Lambda([](TSharedPtr<FFileTreeNode> InItem, const TSharedRef<STableViewBase>& InOwner) -> TSharedRef<ITableRow>
 					{
@@ -435,17 +465,39 @@ void SMainWindow::BuildArchivesList()
 
 void SMainWindow::BuildFilesList()
 {
-	Files.Entries.Reset();
-	if (!Archives.Num())
+	Files.Reset();
+	TArray<FVfs> VfsToLoad;
+	ELoadingMode LoadingMode = *ComboBox_LoadingMode->GetSelectedItem();
+	auto Provider = FFModelApp::Get().Provider;
+	if (LoadingMode == ELoadingMode::All)
 	{
+		for (const FVfs& Vfs : Provider->MountedVfs)
+		{
+			VfsToLoad.Add(Vfs);
+		}
+	}
+	if (!VfsToLoad.Num())
+	{
+		UpdateFilesList();
 		return;
 	}
-	/*auto PakFile = Entries[0]->PakFile;
-	for (FPakFile::FPakEntryIterator It(*PakFile, false); It; ++It)
+	for (const FVfs& Vfs : VfsToLoad)
 	{
-		if (const FString* Filename = It.TryGetFilename())
+		FPakFile& PakFile = *Vfs.PakFile;
+		for (FPakFile::FPakEntryIterator It(PakFile, false); It; ++It)
 		{
-			Files.AddEntry(*Filename);
+			if (const FString* Filename = It.TryGetFilename())
+			{
+				Files.AddEntry(Vfs.GetMountPoint() / *Filename);
+			}
 		}
-	}*/
+	}
+	UpdateFilesList();
 }
+
+void SMainWindow::UpdateFilesList()
+{
+	Tree_Files->SetTreeItemsSource(Files.GetEntries());
+	// @todo: Empty text
+}
+

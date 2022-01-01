@@ -5,6 +5,8 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "PakFile/Public/IPlatformFilePak.h"
 #include "Widgets/SWindow.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/Views/STreeView.h"
 
 struct FVfsEntry
 {
@@ -35,15 +37,48 @@ struct FFileTreeNode
 	bool IsFile() const { return Entries.Num() == 0; }
 
 	FString GetName() const { return FPaths::GetCleanFilename(Path); }
+
+	void Reset()
+	{
+		Entries.Reset();
+		EntriesList = nullptr;
+	}
 };
+
+enum class ELoadingMode
+{
+	Single,
+	Multiple,
+	All,
+	AllButNew,
+	AllButModified,
+	Count
+};
+
+inline const TCHAR* LexToString(ELoadingMode Value)
+{
+	switch (Value)
+	{
+	case ELoadingMode::Single:			return TEXT("Single");
+	case ELoadingMode::Multiple:		return TEXT("Multiple");
+	case ELoadingMode::All:				return TEXT("All");
+	case ELoadingMode::AllButNew:		return TEXT("All (New)");
+	case ELoadingMode::AllButModified:	return TEXT("All (Modified)");
+	default:							return TEXT("");
+	}
+}
 
 class SMainWindow : public SWindow
 {
 protected:
-	TSharedPtr<class FTabManager> TabManager;
-	TArray<TSharedPtr<FString>> Options;
+	TSharedPtr<FTabManager> TabManager;
+	TArray<TSharedPtr<ELoadingMode>> LoadingModeOptions;
 	TArray<TSharedPtr<FVfsEntry>> Archives;
 	FFileTreeNode Files;
+
+	TSharedPtr<SComboBox<TSharedPtr<ELoadingMode>>> ComboBox_LoadingMode;
+	TSharedPtr<SListView<TSharedPtr<FVfsEntry>>> List_Archives;
+	TSharedPtr<STreeView<TSharedPtr<FFileTreeNode>>> Tree_Files;
 
 public:
 	SLATE_BEGIN_ARGS(SMainWindow) { }
@@ -63,4 +98,6 @@ public:
 
 	void BuildArchivesList();
 	void BuildFilesList();
+
+	void UpdateFilesList();
 };

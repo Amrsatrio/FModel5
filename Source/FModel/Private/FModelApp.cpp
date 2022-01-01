@@ -19,8 +19,6 @@ DEFINE_LOG_CATEGORY(LogFModel);
 
 #define LOCTEXT_NAMESPACE "FModel"
 
-FPakPlatformFile* GPakPlatformFile;
-
 namespace WorkspaceMenu
 {
 	TSharedRef<FWorkspaceItem> DeveloperMenu = FWorkspaceItem::NewGroup(LOCTEXT("DeveloperMenu", "Developer"));
@@ -84,17 +82,8 @@ int RunApplication(const TCHAR* CommandLine)
 		// RestoreSlateTestSuite();
 	}
 
-	FFModelApp::Get(); // Initialize singleton
-	// Initialize pak
-	// @todo: Make proper logic for listing and loading pak files, we can't rely on FPakPlatformFile
-	FCoreDelegates::GetPakEncryptionKeyDelegate().BindLambda([](uint8 Key[32])
-	{
-		HexToBytes(TEXT("DAE1418B289573D4148C72F3C76ABC7E2DB9CAA618A3EAF2D8580EB3A1BB7A63"), Key);
-	});
-	IPlatformFile* LowerLevelPlatformFile = &FPlatformFileManager::Get().GetPlatformFile();
-	GPakPlatformFile = new FPakPlatformFile();
-	GPakPlatformFile->Initialize(LowerLevelPlatformFile, TEXT(""));
-	//GPakPlatformFile->MountAllPakFiles({TEXT("C:\\Program Files\\Epic Games\\Fortnite\\FortniteGame\\Content\\Paks")});
+	// Initialize singleton
+	FFModelApp::Get();
 
 	// Open main window
 	FSlateApplication::Get().AddWindow(SNew(SMainWindow));

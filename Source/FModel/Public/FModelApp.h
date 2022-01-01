@@ -7,9 +7,8 @@
 #include "HAL/PlatformFileManager.h"
 #include "IO/IoDispatcher.h"
 #include "PakFile/Public/IPlatformFilePak.h"
+#include "Paks.h"
 #include "Widgets/Docking/SDockTab.h"
-
-extern FPakPlatformFile* GPakPlatformFile;
 
 int RunApplication(const TCHAR* Commandline);
 
@@ -72,6 +71,30 @@ struct FVfs
 			check(false);
 			return false;
 		}
+	}
+
+	FString GetMountPoint() const
+	{
+		FString MountPoint = TEXT("");
+		switch (Type)
+		{
+		case EVfsType::Pak:
+			MountPoint = PakFile->GetMountPoint();
+			break;
+		default:
+			check(false);
+		}
+		return MountPoint;
+	}
+
+	IFileHandle* OpenRead(IPlatformFile* LowerLevel, const FString& Filename) const
+	{
+		FPakEntry Entry;
+		if (PakFile->Find(Filename, &Entry) == FPakFile::EFindResult::Found)
+		{
+			return FPakUtils::CreatePakFileHandle(LowerLevel, PakFile, &Entry);
+		}
+		return nullptr;
 	}
 
 	// Don't care, just use path for comparison
@@ -138,7 +161,7 @@ public:
 		TArray<FVfs> VfsToMount;
 		{
 			FScopeLock Lock(&CollectionsLock);
-			for (FVfs& Vfs : UnloadedVfs)
+			for (const FVfs& Vfs : UnloadedVfs)
 			{
 				if (!Vfs.IsEncrypted())
 				{
@@ -152,6 +175,9 @@ public:
 			FVfs& Vfs = VfsToMount[Index];
 			Vfs.PakFile = new FPakFile(LowerLevel, *Vfs.PakFile->GetFilename(), false, true /*load index this time*/);
 			check(Vfs.PakFile->IsValid());
+			FString MountPoint = Vfs.PakFile->GetMountPoint();
+			NormalizeMountPoint(MountPoint);
+			Vfs.PakFile->SetMountPoint(*MountPoint);
 			{
 				FScopeLock Lock(&CollectionsLock);
 				// @todo: Merge files
@@ -177,7 +203,7 @@ public:
 			FScopeLock Lock(&CollectionsLock);
 			for (auto Pair : InKeys)
 			{
-				for (FVfs& Vfs : UnloadedVfs)
+				for (const FVfs& Vfs : UnloadedVfs)
 				{
 					if (Vfs.GetEncryptionKeyGuid() == Pair.Key)
 					{
@@ -193,6 +219,9 @@ public:
 			FVfs& Vfs = VfsToMount[Index];
 			Vfs.PakFile = new FPakFile(LowerLevel, *Vfs.PakFile->GetFilename(), false, true /*load index this time*/);
 			check(Vfs.PakFile->IsValid());
+			FString MountPoint = Vfs.PakFile->GetMountPoint();
+			NormalizeMountPoint(MountPoint);
+			Vfs.PakFile->SetMountPoint(*MountPoint);
 			{
 				FScopeLock Lock(&CollectionsLock);
 				// @todo: Merge files
@@ -204,8 +233,30 @@ public:
 		return CountNewMounts;
 	}
 
+	IFileHandle* Read(const FString& Path)
+	{
+		FScopeLock Lock(&CollectionsLock);
+		for (const FVfs& Vfs : MountedVfs)
+		{
+			if (IFileHandle* Handle = Vfs.OpenRead(LowerLevel, Path))
+			{
+				return Handle;
+			}
+		}
+		return nullptr;
+	}
+
 	virtual IPlatformFile* GetLowerLevel() /*override*/ { return LowerLevel; }
 	virtual void SetLowerLevel(IPlatformFile* NewLowerLevel) /*override*/ { LowerLevel = NewLowerLevel; }
+
+private:
+	static void NormalizeMountPoint(FString& MountPoint)
+	{
+		if (MountPoint.StartsWith(TEXT("../../../")))
+		{
+			MountPoint = MountPoint.Mid(9);
+		}
+	}
 };
 
 class FFModelApp
