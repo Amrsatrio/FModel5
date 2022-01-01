@@ -73,6 +73,8 @@ int RunApplication(const TCHAR* CommandLine)
 	Style.SetParentStyleName(FEditorStyle::GetStyleSetName());
 	Style.Set("AppIcon", new FSlateImageBrush(FPaths::ProjectContentDir() / TEXT("Icons/FModel-48.png"), FVector2D(45.0f, 45.0f)));
 	Style.Set("AppIcon.Small", new FSlateImageBrush(FPaths::ProjectContentDir() / TEXT("Icons/FModel-24.png"), FVector2D(24.0f, 24.0f)));
+	Style.Set("Icon.ArchiveDisabled", new FSlateImageBrush(FPaths::ProjectContentDir() / TEXT("Icons/archive_disabled.png"), FVector2D(16.0f, 16.0f)));
+	Style.Set("Icon.ArchiveEnabled", new FSlateImageBrush(FPaths::ProjectContentDir() / TEXT("Icons/archive_enabled.png"), FVector2D(16.0f, 16.0f)));
 	FSlateStyleRegistry::RegisterSlateStyle(*StyleRef);
 	FAppStyle::SetAppStyleSetName(StyleRef->GetStyleSetName());
 	//RestoreStarshipSuite();
@@ -82,6 +84,7 @@ int RunApplication(const TCHAR* CommandLine)
 		// RestoreSlateTestSuite();
 	}
 
+	FFModelApp::Get(); // Initialize singleton
 	// Initialize pak
 	// @todo: Make proper logic for listing and loading pak files, we can't rely on FPakPlatformFile
 	FCoreDelegates::GetPakEncryptionKeyDelegate().BindLambda([](uint8 Key[32])
@@ -91,7 +94,7 @@ int RunApplication(const TCHAR* CommandLine)
 	IPlatformFile* LowerLevelPlatformFile = &FPlatformFileManager::Get().GetPlatformFile();
 	GPakPlatformFile = new FPakPlatformFile();
 	GPakPlatformFile->Initialize(LowerLevelPlatformFile, TEXT(""));
-	GPakPlatformFile->MountAllPakFiles({TEXT("C:\\Program Files\\Epic Games\\Fortnite\\FortniteGame\\Content\\Paks")});
+	//GPakPlatformFile->MountAllPakFiles({TEXT("C:\\Program Files\\Epic Games\\Fortnite\\FortniteGame\\Content\\Paks")});
 
 	// Open main window
 	FSlateApplication::Get().AddWindow(SNew(SMainWindow));

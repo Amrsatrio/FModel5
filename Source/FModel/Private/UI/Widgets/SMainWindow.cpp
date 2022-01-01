@@ -1,7 +1,9 @@
 ﻿#include "SMainWindow.h"
 
 #include "FModelApp.h"
+#include "Brushes/SlateImageBrush.h"
 #include "Framework/Docking/TabManager.h"
+#include "Internationalization/Regex.h"
 #include "Misc/FileHelper.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
@@ -22,7 +24,7 @@ void SMainWindow::MakeDirectoryMenu(FMenuBuilder& MenuBuilder)
 		INVTEXT("AES"),
 		FText::GetEmpty(),
 		FSlateIcon(),
-		FUIAction(FExecuteAction::CreateLambda([this] { KeychainWindow->ShowWindow(); }))
+		FUIAction(FExecuteAction::CreateLambda([this] { FSlateApplication::Get().AddWindow(SNew(SKeychainWindow)); }))
 	);
 	MenuBuilder.AddMenuEntry(
 		INVTEXT("Backup"),
@@ -182,7 +184,7 @@ TSharedRef<SMultiLineEditableTextBox> PopulateTabContents(const TSharedPtr<FFile
 	FString Result;
 	FFileHelper::LoadFileToString(Result, GPakPlatformFile, *Item->Path);
 	return SNew(SMultiLineEditableTextBox)
-		.Font(FCoreStyle::Get().GetFontStyle("MonospacedText"))
+		.Font(FCoreStyle::GetDefaultFontStyle("Mono", 10))
 		.Text(FText::FromString(Result));
 }
 
@@ -227,15 +229,8 @@ void SMainWindow::Construct(const FArguments& Args)
 		MakeShared<FString>(TEXT("All (New)")),
 		MakeShared<FString>(TEXT("All (Modified)")),
 	};
-	Dummy = {
-		MakeShared<FString>(TEXT("There")),
-		MakeShared<FString>(TEXT("Is")),
-		MakeShared<FString>(TEXT("Nothing")),
-		MakeShared<FString>(TEXT("In")),
-		MakeShared<FString>(TEXT("Here")),
-	};
 
-	BuildPakList();
+	BuildArchivesList();
 	BuildFilesList();
 
 	TabManager->RegisterTabSpawner("Archives", FOnSpawnTab::CreateLambda([this](const FSpawnTabArgs& Args)
@@ -246,11 +241,13 @@ void SMainWindow::Construct(const FArguments& Args)
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
+				.Padding(4, 4, 4, 0)
 				[
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
 					.VAlign(VAlign_Center)
+					.Padding(0, 0, 4, 0)
 					[
 						SNew(STextBlock)
 						.Text(INVTEXT("Loading Mode"))
@@ -260,25 +257,54 @@ void SMainWindow::Construct(const FArguments& Args)
 					[
 						SNew(STextComboBox)
 						.OptionsSource(&Options)
+						.InitiallySelectedItem(Options[2])
 					]
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
+				.Padding(4, 4, 4, 4)
 				[
 					SNew(SButton)
-					.Text(INVTEXT("Load"))
 					.HAlign(HAlign_Center)
+					.Text(INVTEXT("Load"))
+					.OnClicked_Lambda([]
+					{
+						FAES::FAESKey Key;
+						HexToBytes(TEXT("DAE1418B289573D4148C72F3C76ABC7E2DB9CAA618A3EAF2D8580EB3A1BB7A63"), Key.Key);
+						FFModelApp::Get().Provider->SubmitKey(FGuid(), Key);
+						return FReply::Handled();
+					})
 				]
 				+ SVerticalBox::Slot()
 				.FillHeight(1.0f)
 				[
 					SNew(SListView<TSharedPtr<FVfsEntry>>)
-					.ListItemsSource(&Entries)
+					.ListItemsSource(&Archives)
 					.OnGenerateRow_Lambda([](TSharedPtr<FVfsEntry> InItem, const TSharedRef<STableViewBase>& InOwner) -> TSharedRef<ITableRow>
 					{
+						FNumberFormattingOptions Options;
+						Options.MaximumFractionalDigits = 2;
 						return SNew(STableRow<TSharedPtr<FVfsEntry>>, InOwner)
+						.Padding(FMargin(6, 2))
 						[
-							SNew(STextBlock).Text(FText::FromString(InItem->Name))
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0, 0, 4, 0)
+							[
+								SNew(SImage)
+								.Image(FAppStyle::Get().GetBrush("Icon.ArchiveEnabled"))
+							]
+							+ SHorizontalBox::Slot()
+							.FillWidth(1)
+							[
+								SNew(STextBlock).Text(FText::FromString(InItem->Name))
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							[
+								SNew(STextBlock).Text(FText::AsMemory(InItem->Size, &Options))
+							]
 						];
 					})
 				]
@@ -378,34 +404,26 @@ void SMainWindow::Construct(const FArguments& Args)
 		]
 	);
 
-	KeychainWindow = SNew(SKeychainWindow);
-	FSlateApplication::Get().AddWindow(KeychainWindow.ToSharedRef(), false);
+	// TabManager->TryInvokeTab(FName("WidgetReflector"));
 }
 
-void SMainWindow::BuildPakList()
+void SMainWindow::BuildArchivesList()
 {
-	uint8* PakProviderAddr = reinterpret_cast<uint8*>(GPakPlatformFile);
-	PakProviderAddr += sizeof(void*); // vtable
-	IPlatformFile** LowerLevel = (IPlatformFile**)PakProviderAddr;
-	PakProviderAddr += sizeof(IPlatformFile*); // LowerLevel
-	TArray<FPakListEntry>* PakFiles = (TArray<FPakListEntry>*)PakProviderAddr;
-	PakProviderAddr += sizeof(TArray<FPakListEntry>); // PakFiles
-	TArray<FPakListDeferredEntry>* PendingEncryptedPakFiles = (TArray<FPakListDeferredEntry>*)PakProviderAddr;
-	PakProviderAddr += sizeof(TArray<FPakListDeferredEntry>); // PendingEncryptedPakFiles
+	Archives.Empty();
 
-	Entries.Empty();
-	for (const FPakListEntry& PakFile : *PakFiles)
+	FRegexPattern ArchiveNamePattern("^(?!global|pakchunk.+optional\\-).+(pak|utoc)$", ERegexPatternFlags::CaseInsensitive);
+	FVfsPlatformFile* Provider = FFModelApp::Get().Provider;
+	for (const FVfs& Vfs : Provider->UnloadedVfs)
 	{
-		Entries.Add(MakeShared<FVfsEntry>(PakFile));
-	}
-
-	for (const FPakListDeferredEntry& PendingEncryptedPakFile : *PendingEncryptedPakFiles)
-	{
-		Entries.Add(MakeShared<FVfsEntry>(PendingEncryptedPakFile));
+		FRegexMatcher Matcher(ArchiveNamePattern, Vfs.GetName());
+		if (Vfs.GetSize() > 365 && Matcher.FindNext())
+		{
+			Archives.Add(MakeShared<FVfsEntry>(Vfs));
+		}
 	}
 
 	// chunk id then name
-	Algo::Sort(Entries, [](const TSharedPtr<FVfsEntry>& A, const TSharedPtr<FVfsEntry>& B)
+	Algo::Sort(Archives, [](const TSharedPtr<FVfsEntry>& A, const TSharedPtr<FVfsEntry>& B)
 	{
 		if (A->ChunkId != B->ChunkId)
 		{
@@ -417,13 +435,17 @@ void SMainWindow::BuildPakList()
 
 void SMainWindow::BuildFilesList()
 {
-	auto PakFile = Entries[0]->PakFile;
 	Files.Entries.Reset();
+	if (!Archives.Num())
+	{
+		return;
+	}
+	/*auto PakFile = Entries[0]->PakFile;
 	for (FPakFile::FPakEntryIterator It(*PakFile, false); It; ++It)
 	{
 		if (const FString* Filename = It.TryGetFilename())
 		{
 			Files.AddEntry(*Filename);
 		}
-	}
+	}*/
 }

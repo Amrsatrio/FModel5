@@ -13,6 +13,7 @@ public class FModel : ModuleRules
 				"ApplicationCore",
 				"Core",
 				"EditorStyle",
+				"HTTP",
 				"OutputLog",
 				"PakFile",
 				"Projects",
