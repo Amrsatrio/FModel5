@@ -20,16 +20,12 @@ enum class EVfsType
 
 struct FVfs
 {
-	union
-	{
-		FPakFile* PakFile;
-		FIoStoreReader* IoStoreReader;
-		void* RawPtr;
-	};
+	TRefCountPtr<FPakFile> PakFile;
+	FIoStoreReader* IoStoreReader;
 	EVfsType Type;
 	FString Path;
 
-	FVfs(FPakFile* InPakFile)
+	FVfs(TRefCountPtr<FPakFile> InPakFile)
 		: PakFile(InPakFile)
 		, Type(EVfsType::Pak)
 		, Path(InPakFile->GetFilename())
@@ -277,6 +273,7 @@ public:
 	FFModelApp()
 	{
 		Provider = new FVfsPlatformFile("C:\\Program Files\\Epic Games\\Fortnite\\FortniteGame\\Content\\Paks");
+		// Provider = new FVfsPlatformFile("D:\\Downloads\\TestPak");
 		IPlatformFile* LowerLevelPlatformFile = &FPlatformFileManager::Get().GetPlatformFile();
 		Provider->Initialize(LowerLevelPlatformFile, nullptr);
 	}

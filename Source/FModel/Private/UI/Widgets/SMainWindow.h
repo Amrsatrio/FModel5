@@ -13,15 +13,45 @@ struct FVfsEntry
 	FString Name;
 	int64 Size;
 	FGuid EncryptionKeyGuid;
-	int32 ChunkId;
 	FPakFile* PakFile;
 
 	explicit FVfsEntry(const FVfs& Vfs)
 		: Name(Vfs.GetName())
 		, Size(Vfs.GetSize())
 		, EncryptionKeyGuid(Vfs.GetEncryptionKeyGuid())
-		, ChunkId(FPlatformMisc::GetPakchunkIndexFromPakFile(Name))
 		, PakFile(Vfs.PakFile /*paks only for now*/) { }
+
+	int32 GetChunkId() const { return FPlatformMisc::GetPakchunkIndexFromPakFile(Name); }
+
+	int32 GetSplitNumber() const
+	{
+		FString SplitIdentifier(TEXT("_s"));
+		FString BaseFilename = FPaths::GetBaseFilename(Name);
+		int32 SplitNumber = INDEX_NONE;
+		int32 SplitIdentifierIdx = BaseFilename.Find(SplitIdentifier);
+
+		if (SplitIdentifierIdx != INDEX_NONE)
+		{
+			int32 StartOfNumber = SplitIdentifierIdx + SplitIdentifier.Len();
+			int32 DigitCount = 0;
+			if (FChar::IsDigit(BaseFilename[StartOfNumber]))
+			{
+				while ((DigitCount + StartOfNumber) < BaseFilename.Len() && FChar::IsDigit(BaseFilename[StartOfNumber + DigitCount]))
+				{
+					DigitCount++;
+				}
+
+				if ((StartOfNumber + DigitCount) < BaseFilename.Len())
+				{
+					FString SplitNumberString = BaseFilename.Mid(StartOfNumber, DigitCount);
+					check(SplitNumberString.IsNumeric());
+					TTypeFromString<int32>::FromString(SplitNumber, *SplitNumberString);
+				}
+			}
+		}
+
+		return SplitNumber;
+	}
 };
 
 struct FFileTreeNode
@@ -29,6 +59,7 @@ struct FFileTreeNode
 	TMap<FString, TSharedPtr<FFileTreeNode>> Entries;
 	TArray<TSharedPtr<FFileTreeNode>>* EntriesList = nullptr;
 	FString Path;
+	FFileTreeNode* Parent = nullptr;
 
 	void AddEntry(const FString& sEntry, int wBegIndex = 0);
 
@@ -78,6 +109,7 @@ protected:
 
 	TSharedPtr<SComboBox<TSharedPtr<ELoadingMode>>> ComboBox_LoadingMode;
 	TSharedPtr<SListView<TSharedPtr<FVfsEntry>>> List_Archives;
+	TSharedPtr<SBreadcrumbTrail<FFileTreeNode*>> Breadcrumb_Path;
 	TSharedPtr<STreeView<TSharedPtr<FFileTreeNode>>> Tree_Files;
 
 public:

@@ -152,6 +152,7 @@ void FFileTreeNode::AddEntry(const FString& sEntry, int wBegIndex)
 			{
 				oItem = MakeShared<FFileTreeNode>();
 				oItem->Path = sEntry.Left(wEndIndex);
+				oItem->Parent = this;
 			}
 			oItem->AddEntry(sEntry, wEndIndex + 1);
 		}
@@ -179,31 +180,74 @@ TArray<TSharedPtr<FFileTreeNode>>* FFileTreeNode::GetEntries()
 	return EntriesList;
 }
 
-TSharedRef<SMultiLineEditableTextBox> PopulateTabContents(const TSharedPtr<FFileTreeNode>& Item)
+TUniquePtr<FArchive> Read(const TSharedPtr<FFileTreeNode>& Item)
 {
-	check(Item->IsFile())
-	FString Result;
-
 	const TCHAR* Filename = *Item->Path;
 	if (IFileHandle* File = FFModelApp::Get().Provider->Read(Filename))
 	{
 		if (TUniquePtr<FArchive> Reader = MakeUnique<FArchiveFileReaderGeneric>(File, Filename, File->Size()))
 		{
-			FFileHelper::LoadFileToString(Result, *Reader.Get());
+			return Reader;
 		}
 		else
 		{
-			UE_LOG(LogStreaming, Warning, TEXT("Failed to read file '%s' error."), Filename);
+			UE_LOG(LogFModel, Warning, TEXT("Failed to read file '%s' error."), Filename);
 		}
 	}
 	else
 	{
-		UE_LOG(LogStreaming, Warning, TEXT("Failed to read file '%s' error."), Filename);
+		UE_LOG(LogFModel, Warning, TEXT("Failed to read file '%s' error."), Filename);
 	}
 
+	return nullptr;
+}
+
+TSharedRef<SMultiLineEditableTextBox> TextBox(const FString& S)
+{
 	return SNew(SMultiLineEditableTextBox)
+		.Style(FEditorStyle::Get(), "Log.TextBox")
 		.Font(FCoreStyle::GetDefaultFontStyle("Mono", 10))
-		.Text(FText::FromString(Result));
+		.IsReadOnly(true)
+		.Text(FText::FromString(S));
+}
+
+TSharedRef<SWidget> EmptyInTheMiddle(const FText Text)
+{
+	return SNew(SBox)
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Text(Text)
+		];
+}
+
+TArray<FString> TextExtensions = {
+	"ini",
+	"json",
+	"uplugin",
+	"uproject"
+};
+
+TSharedRef<SWidget> PopulateTabContents(const TSharedPtr<FFileTreeNode>& Item)
+{
+	check(Item->IsFile());
+
+	TUniquePtr<FArchive> Ar = Read(Item);
+	if (!Ar)
+	{
+		FText Text = INVTEXT("Failed to load file");
+		return EmptyInTheMiddle(Text);
+	}
+
+	FString Ext = FPaths::GetExtension(Item->Path).ToLower();
+	if (TextExtensions.Contains(Ext))
+	{
+		FString Result;
+		FFileHelper::LoadFileToString(Result, *Ar);
+		return TextBox(Result);
+	}
+
+	return EmptyInTheMiddle(FText::Format(INVTEXT("Unsupported file type: {0}"), FText::FromString(Ext)));
 }
 
 void SMainWindow::Construct(const FArguments& Args)
@@ -351,8 +395,7 @@ void SMainWindow::Construct(const FArguments& Args)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				[
-					SNew(SBreadcrumbTrail<FFileTreeNode>)
-
+					SAssignNew(Breadcrumb_Path, SBreadcrumbTrail<FFileTreeNode*>)
 				]
 				+ SVerticalBox::Slot()
 				.FillHeight(1.0f)
@@ -375,11 +418,27 @@ void SMainWindow::Construct(const FArguments& Args)
 						if (Item.IsValid() && Item->IsFile())
 						{
 							TSharedRef<SDockTab> Tab = SNew(SDockTab)
+								.TabRole(DocumentTab)
 								.Label(FText::FromString(Item->GetName()))
 								[
 									PopulateTabContents(Item)
 								];
 							TabManager->InsertNewDocumentTab("Document", FTabManager::ESearchPreference::RequireClosedTab, Tab);
+						}
+					})
+					.OnSelectionChanged_Lambda([this](TSharedPtr<FFileTreeNode> InItem, ESelectInfo::Type SelectInfo)
+					{
+						Breadcrumb_Path->ClearCrumbs();
+						TArray<FFileTreeNode*> NodesToRoot;
+						FFileTreeNode* Current = InItem.Get();
+						while (Current && Current->Path.Len())
+						{
+							NodesToRoot.Add(Current);
+							Current = Current->Parent;
+						}
+						for (int32 i = NodesToRoot.Num(); i--;)
+						{
+							Breadcrumb_Path->PushCrumb(FText::FromString(NodesToRoot[i]->GetName()), NodesToRoot[i]);
 						}
 					})
 				]
@@ -455,9 +514,17 @@ void SMainWindow::BuildArchivesList()
 	// chunk id then name
 	Algo::Sort(Archives, [](const TSharedPtr<FVfsEntry>& A, const TSharedPtr<FVfsEntry>& B)
 	{
-		if (A->ChunkId != B->ChunkId)
+		int32 AChunkId = A->GetChunkId();
+		int32 BChunkId = B->GetChunkId();
+		if (AChunkId != BChunkId)
 		{
-			return A->ChunkId < B->ChunkId;
+			return AChunkId < BChunkId;
+		}
+		int32 ASplitNumber = A->GetSplitNumber();
+		int32 BSplitNumber = B->GetSplitNumber();
+		if (ASplitNumber != BSplitNumber)
+		{
+			return ASplitNumber < BSplitNumber;
 		}
 		return A->Name < B->Name;
 	});
