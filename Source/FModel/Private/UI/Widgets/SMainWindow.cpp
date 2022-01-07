@@ -5,6 +5,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "HAL/FileManagerGeneric.h"
 #include "Internationalization/Regex.h"
+#include "Internationalization/TextLocalizationResource.h"
 #include "Misc/FileHelper.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
@@ -145,7 +146,7 @@ void FFileTreeNode::AddEntry(const FString& sEntry, int wBegIndex)
 			wEndIndex = sEntry.Len();
 		}
 		FString sKey = sEntry.Mid(wBegIndex, wEndIndex - wBegIndex);
-		if (sKey.Len())
+		if (!sKey.IsEmpty())
 		{
 			TSharedPtr<FFileTreeNode>& oItem = Entries.FindOrAdd(sKey);
 			if (!oItem.IsValid())
@@ -228,22 +229,78 @@ TArray<FString> TextExtensions = {
 	"uproject"
 };
 
+TSharedRef<SWidget> Json(TSharedRef<FJsonObject> JsonObject)
+{
+	FString JsonString;
+	TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&JsonString);
+	check(FJsonSerializer::Serialize(JsonObject, JsonWriter));
+	return TextBox(JsonString);
+}
+
 TSharedRef<SWidget> PopulateTabContents(const TSharedPtr<FFileTreeNode>& Item)
 {
 	check(Item->IsFile());
 
-	TUniquePtr<FArchive> Ar = Read(Item);
-	if (!Ar)
+	TUniquePtr<FArchive> ArPtr = Read(Item);
+	if (!ArPtr)
 	{
-		FText Text = INVTEXT("Failed to load file");
-		return EmptyInTheMiddle(Text);
+		return EmptyInTheMiddle(INVTEXT("Failed to load file"));
 	}
 
+	FArchive& Ar = *ArPtr;
 	FString Ext = FPaths::GetExtension(Item->Path).ToLower();
-	if (TextExtensions.Contains(Ext))
+	if (Ext == TEXT("uasset"))
+	{
+		return EmptyInTheMiddle(INVTEXT("Coming soon"));
+	}
+	else if (Ext == TEXT("locmeta"))
+	{
+		FTextLocalizationMetaDataResource LocMeta;
+		LocMeta.LoadFromArchive(Ar, Item->Path);
+		TSharedRef<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
+		JsonObject->SetStringField("NativeCulture", LocMeta.NativeCulture);
+		JsonObject->SetStringField("NativeLocRes", LocMeta.NativeLocRes);
+		{
+			TArray<TSharedPtr<FJsonValue>> CompiledCulturesJson;
+			for (const FString& CompiledCulture : LocMeta.CompiledCultures)
+			{
+				CompiledCulturesJson.Add(MakeShared<FJsonValueString>(CompiledCulture));
+			}
+			JsonObject->SetArrayField("CompiledCultures", CompiledCulturesJson);
+		}
+		return Json(JsonObject);
+	}
+	else if (Ext == TEXT("locres"))
+	{
+		FTextLocalizationResource LocRes;
+		LocRes.LoadFromArchive(Ar, FTextKey(Item->Path), 0);
+		TSharedRef<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
+		for (auto Pair : LocRes.Entries)
+		{
+			FString Namespace = Pair.Key.GetNamespace().GetChars();
+			if (Namespace.IsEmpty())
+			{
+				Namespace = TEXT(" "); // FIXME: FJsonSerializer does not support serializing objects with empty string as the key
+			}
+			FString Key = Pair.Key.GetKey().GetChars();
+			TSharedPtr<FJsonObject> NamespaceObject;
+			if (!JsonObject->HasField(Namespace)) // Performance improvement is really needed here
+			{
+				NamespaceObject = MakeShareable(new FJsonObject());
+				JsonObject->SetObjectField(Namespace, NamespaceObject);
+			}
+			else
+			{
+				NamespaceObject = JsonObject->GetObjectField(Namespace);
+			}
+			NamespaceObject->SetStringField(Key, *Pair.Value.LocalizedString);
+		}
+		return Json(JsonObject);
+	}
+	else if (TextExtensions.Contains(Ext))
 	{
 		FString Result;
-		FFileHelper::LoadFileToString(Result, *Ar);
+		FFileHelper::LoadFileToString(Result, Ar);
 		return TextBox(Result);
 	}
 
@@ -431,7 +488,7 @@ void SMainWindow::Construct(const FArguments& Args)
 						Breadcrumb_Path->ClearCrumbs();
 						TArray<FFileTreeNode*> NodesToRoot;
 						FFileTreeNode* Current = InItem.Get();
-						while (Current && Current->Path.Len())
+						while (Current && !Current->Path.IsEmpty())
 						{
 							NodesToRoot.Add(Current);
 							Current = Current->Parent;
