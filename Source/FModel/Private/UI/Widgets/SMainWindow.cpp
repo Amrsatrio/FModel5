@@ -7,6 +7,7 @@
 #include "Internationalization/Regex.h"
 #include "Internationalization/TextLocalizationResource.h"
 #include "Misc/FileHelper.h"
+#include "Serialization/JsonSerializerMacros.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
@@ -229,14 +230,6 @@ TArray<FString> TextExtensions = {
 	"uproject"
 };
 
-TSharedRef<SWidget> Json(TSharedRef<FJsonObject> JsonObject)
-{
-	FString JsonString;
-	TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&JsonString);
-	check(FJsonSerializer::Serialize(JsonObject, JsonWriter));
-	return TextBox(JsonString);
-}
-
 TSharedRef<SWidget> PopulateTabContents(const TSharedPtr<FFileTreeNode>& Item)
 {
 	check(Item->IsFile());
@@ -257,45 +250,60 @@ TSharedRef<SWidget> PopulateTabContents(const TSharedPtr<FFileTreeNode>& Item)
 	{
 		FTextLocalizationMetaDataResource LocMeta;
 		LocMeta.LoadFromArchive(Ar, Item->Path);
-		TSharedRef<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
-		JsonObject->SetStringField("NativeCulture", LocMeta.NativeCulture);
-		JsonObject->SetStringField("NativeLocRes", LocMeta.NativeLocRes);
+
+		FString JsonString;
+		TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&JsonString);
+
+		JsonWriter->WriteObjectStart();
+
+		JsonWriter->WriteValue("NativeCulture", LocMeta.NativeCulture);
+		JsonWriter->WriteValue("NativeLocRes", LocMeta.NativeLocRes);
+
+		JsonWriter->WriteIdentifierPrefix("CompiledCultures");
+		JsonWriter->WriteArrayStart();
+		for (const FString& CompiledCulture : LocMeta.CompiledCultures)
 		{
-			TArray<TSharedPtr<FJsonValue>> CompiledCulturesJson;
-			for (const FString& CompiledCulture : LocMeta.CompiledCultures)
-			{
-				CompiledCulturesJson.Add(MakeShared<FJsonValueString>(CompiledCulture));
-			}
-			JsonObject->SetArrayField("CompiledCultures", CompiledCulturesJson);
+			JsonWriter->WriteValue(CompiledCulture);
 		}
-		return Json(JsonObject);
+		JsonWriter->WriteArrayEnd();
+
+		JsonWriter->WriteObjectEnd();
+		JsonWriter->Close();
+		return TextBox(JsonString);
 	}
 	else if (Ext == TEXT("locres"))
 	{
 		FTextLocalizationResource LocRes;
 		LocRes.LoadFromArchive(Ar, FTextKey(Item->Path), 0);
-		TSharedRef<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
+
+		FString JsonString;
+		TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&JsonString);
+		JsonWriter->WriteObjectStart();
+
+		const TCHAR* LastNamespace = nullptr;
 		for (auto Pair : LocRes.Entries)
 		{
-			FString Namespace = Pair.Key.GetNamespace().GetChars();
-			if (Namespace.IsEmpty())
+			const TCHAR* Namespace = Pair.Key.GetNamespace().GetChars();
+			const TCHAR* Key = Pair.Key.GetKey().GetChars();
+			if (LastNamespace != Namespace)
 			{
-				Namespace = TEXT(" "); // FIXME: FJsonSerializer does not support serializing objects with empty string as the key
+				if (LastNamespace)
+				{
+					JsonWriter->WriteObjectEnd();
+				}
+				JsonWriter->WriteObjectStart(Namespace);
+				LastNamespace = Namespace;
 			}
-			FString Key = Pair.Key.GetKey().GetChars();
-			TSharedPtr<FJsonObject> NamespaceObject;
-			if (!JsonObject->HasField(Namespace)) // Performance improvement is really needed here
-			{
-				NamespaceObject = MakeShareable(new FJsonObject());
-				JsonObject->SetObjectField(Namespace, NamespaceObject);
-			}
-			else
-			{
-				NamespaceObject = JsonObject->GetObjectField(Namespace);
-			}
-			NamespaceObject->SetStringField(Key, *Pair.Value.LocalizedString);
+			JsonWriter->WriteValue(Key, *Pair.Value.LocalizedString);
 		}
-		return Json(JsonObject);
+		if (!LocRes.IsEmpty())
+		{
+			JsonWriter->WriteObjectEnd();
+		}
+
+		JsonWriter->WriteObjectEnd();
+		JsonWriter->Close();
+		return TextBox(JsonString);
 	}
 	else if (TextExtensions.Contains(Ext))
 	{
