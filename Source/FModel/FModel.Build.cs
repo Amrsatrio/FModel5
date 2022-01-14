@@ -47,6 +47,9 @@ public class FModel : ModuleRules
 		}
 
 		PrivateIncludePaths.Add(EngineDirectory + "/Source/Runtime/Launch/Private");		// For LaunchEngineLoop.cpp include
+		PrivateIncludePaths.Add(EngineDirectory + "/Source/Runtime/Core/Internal");
+		PrivateIncludePaths.Add(EngineDirectory + "/Source/Runtime/PakFile/Internal");
+		PrivateIncludePaths.Add(EngineDirectory + "/Source/Runtime/PakFile/Private");
 
 		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
 		{

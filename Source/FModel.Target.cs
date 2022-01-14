@@ -32,5 +32,7 @@ public class FModelTarget : TargetRules
 
         bUseLoggingInShipping = true;
         bCompileWithPluginSupport = false;
+
+        GlobalDefinitions.Add("USE_IO_DISPATCHER=1");
 	}
 }

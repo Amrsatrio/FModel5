@@ -17,7 +17,7 @@ struct FVfsEntry
 
 	explicit FVfsEntry(const FVfs& Vfs)
 		: Name(Vfs.GetName())
-		, Size(Vfs.GetSize())
+		, Size(Vfs.Size)
 		, EncryptionKeyGuid(Vfs.GetEncryptionKeyGuid())
 		, PakFile(Vfs.PakFile /*paks only for now*/) { }
 

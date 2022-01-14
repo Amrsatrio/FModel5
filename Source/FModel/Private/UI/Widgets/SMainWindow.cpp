@@ -258,14 +258,7 @@ TSharedRef<SWidget> PopulateTabContents(const TSharedPtr<FFileTreeNode>& Item)
 
 		JsonWriter->WriteValue("NativeCulture", LocMeta.NativeCulture);
 		JsonWriter->WriteValue("NativeLocRes", LocMeta.NativeLocRes);
-
-		JsonWriter->WriteIdentifierPrefix("CompiledCultures");
-		JsonWriter->WriteArrayStart();
-		for (const FString& CompiledCulture : LocMeta.CompiledCultures)
-		{
-			JsonWriter->WriteValue(CompiledCulture);
-		}
-		JsonWriter->WriteArrayEnd();
+		JsonWriter->WriteValue("CompiledCultures", LocMeta.CompiledCultures);
 
 		JsonWriter->WriteObjectEnd();
 		JsonWriter->Close();
@@ -570,7 +563,7 @@ void SMainWindow::BuildArchivesList()
 	for (const FVfs& Vfs : Provider->UnloadedVfs)
 	{
 		FRegexMatcher Matcher(ArchiveNamePattern, Vfs.GetName());
-		if (Vfs.GetSize() > 365 && Matcher.FindNext())
+		if (Vfs.Size > 365 && Matcher.FindNext())
 		{
 			Archives.Add(MakeShared<FVfsEntry>(Vfs));
 		}
@@ -615,6 +608,7 @@ void SMainWindow::BuildFilesList()
 	}
 	for (const FVfs& Vfs : VfsToLoad)
 	{
+		if (Vfs.Type != EVfsType::Pak) continue;
 		FPakFile& PakFile = *Vfs.PakFile;
 		for (FPakFile::FPakEntryIterator It(PakFile, false); It; ++It)
 		{

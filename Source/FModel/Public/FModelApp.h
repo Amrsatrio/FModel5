@@ -4,8 +4,11 @@
 #include "ISlateReflectorModule.h"
 #include "FModel.h"
 #include "Async/ParallelFor.h"
+#include "FilePackageStore.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
-#include "IO/IoDispatcher.h"
+#include "IO/IoContainerHeader.h"
+#include "IoDispatcherFileBackend.h"
 #include "PakFile/Public/IPlatformFilePak.h"
 #include "Paks.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -21,25 +24,29 @@ enum class EVfsType
 struct FVfs
 {
 	TRefCountPtr<FPakFile> PakFile;
-	FIoStoreReader* IoStoreReader;
+	TSharedPtr<FIoStoreTocResource> IoStoreToc;
 	EVfsType Type;
 	FString Path;
+	int64 Size;
 
 	FVfs(TRefCountPtr<FPakFile> InPakFile)
 		: PakFile(InPakFile)
 		, Type(EVfsType::Pak)
 		, Path(InPakFile->GetFilename())
-	{}
+	{
+		Size = PakFile->TotalSize();
+	}
 
-	FVfs(FIoStoreReader* InIoStoreReader, const FString& InPath)
-		: IoStoreReader(InIoStoreReader)
+	FVfs(TSharedPtr<FIoStoreTocResource> InIoStoreToc, const FString& InPath)
+		: IoStoreToc(InIoStoreToc)
 		, Type(EVfsType::IoStore)
 		, Path(InPath)
-	{}
+	{
+		FString ContainerPath = InPath.LeftChop(5) + TEXT(".ucas");
+		Size = IFileManager::Get().FileSize(*ContainerPath); // Don't care about partitions yet
+	}
 
 	FString GetName() const { return FPaths::GetCleanFilename(Path); }
-
-	int64 GetSize() const { return Type == EVfsType::Pak ? PakFile->TotalSize() : 0; }
 
 	FGuid GetEncryptionKeyGuid() const
 	{
@@ -48,7 +55,7 @@ struct FVfs
 		case EVfsType::Pak:
 			return PakFile->GetInfo().EncryptionKeyGuid;
 		case EVfsType::IoStore:
-			return IoStoreReader->GetEncryptionKeyGuid();
+			return IoStoreToc->Header.EncryptionKeyGuid;
 		default:
 			check(false);
 			return FGuid();
@@ -62,7 +69,7 @@ struct FVfs
 		case EVfsType::Pak:
 			return !!PakFile->GetInfo().bEncryptedIndex;
 		case EVfsType::IoStore:
-			return !!(IoStoreReader->GetContainerFlags() & EIoContainerFlags::Encrypted);
+			return EnumHasAnyFlags(IoStoreToc->Header.ContainerFlags, EIoContainerFlags::Encrypted);
 		default:
 			check(false);
 			return false;
@@ -99,7 +106,7 @@ struct FVfs
 };
 
 // CUE4Parse & JFortniteParse equivalent: DefaultFileProvider
-class FVfsPlatformFile// : public IPlatformFile
+class FVfsPlatformFile : public IPlatformFile
 {
 public:
 	TSet<FVfs> UnloadedVfs;
@@ -108,11 +115,15 @@ public:
 	TSet<FGuid> RequiredKeys;
 	FCriticalSection CollectionsLock;
 
-	FString Directory;
+	TArray<FString> Directories;
 	IPlatformFile* LowerLevel;
 
-	FVfsPlatformFile(const FString& InDirectory) : Directory(InDirectory)
+	TSharedPtr<FFileIoStore> IoDispatcherFileBackend;
+	TSharedPtr<FFilePackageStore> FilePackageStore;
+
+	FVfsPlatformFile(const FString& InDirectory)
 	{
+		Directories.Add(InDirectory);
 		FPakPlatformFile::GetPakCustomEncryptionDelegate().BindLambda([this](uint8* InData, uint32 InDataSize, FGuid InEncryptionKeyGuid)
 		{
 			FAES::FAESKey& Key = Keys.FindChecked(InEncryptionKeyGuid);
@@ -120,35 +131,55 @@ public:
 		});
 	}
 
-	virtual ~FVfsPlatformFile() = default;
+	virtual ~FVfsPlatformFile() override = default;
 
 	// Specific to DefaultFileProvider aka local file system
-	virtual bool Initialize(IPlatformFile* Inner, const TCHAR* CmdLine) /*override*/
+	virtual bool Initialize(IPlatformFile* Inner, const TCHAR* CmdLine) override
 	{
 		LowerLevel = Inner;
-		Inner->IterateDirectory(*Directory, [this](const TCHAR* FilenameOrDirectory, bool bIsDirectory) -> bool
+		for (const FString& Directory : Directories)
 		{
-			FString Extension = FPaths::GetExtension(FilenameOrDirectory);
-			if (Extension == TEXT("pak"))
+			Inner->IterateDirectory(*Directory, [this](const TCHAR* FilenameOrDirectory, bool bIsDirectory) -> bool
 			{
-				UE_LOG(LogFModel, Display, TEXT("Found pak file %s"), FilenameOrDirectory);
-				FPakFile* PakFile = new FPakFile(LowerLevel, FilenameOrDirectory, false, false);
-				if (PakFile->IsValid())
+				FString Extension = FPaths::GetExtension(FilenameOrDirectory);
+				if (Extension == TEXT("pak"))
 				{
-					FScopeLock Lock(&CollectionsLock);
-					if (PakFile->GetInfo().bEncryptedIndex && !RequiredKeys.Contains(PakFile->GetInfo().EncryptionKeyGuid))
+					UE_LOG(LogFModel, Display, TEXT("Found pak file %s"), FilenameOrDirectory);
+					FPakFile* PakFile = new FPakFile(LowerLevel, FilenameOrDirectory, false, false);
+					if (PakFile->IsValid())
 					{
-						RequiredKeys.Add(PakFile->GetInfo().EncryptionKeyGuid);
+						FScopeLock Lock(&CollectionsLock);
+						if (PakFile->GetInfo().bEncryptedIndex)
+						{
+							RequiredKeys.Add(PakFile->GetInfo().EncryptionKeyGuid);
+						}
+						UnloadedVfs.Emplace(PakFile);
 					}
-					UnloadedVfs.Emplace(PakFile);
 				}
-			}
-			else if (Extension == TEXT("utoc"))
-			{
-				// @todo: Mount IoStores
-			}
-			return true;
-		});
+				else if (Extension == TEXT("utoc"))
+				{
+					UE_LOG(LogFModel, Display, TEXT("Found IoStore %s"), FilenameOrDirectory);
+					if (!IoDispatcherFileBackend.IsValid())
+					{
+						FIoDispatcher& IoDispatcher = FIoDispatcher::Get();
+						IoDispatcherFileBackend = CreateIoDispatcherFileBackend();
+						IoDispatcher.Mount(IoDispatcherFileBackend.ToSharedRef());
+						FilePackageStore = MakeShared<FFilePackageStore>();
+					}
+					TSharedPtr<FIoStoreTocResource> Toc = MakeShared<FIoStoreTocResource>();
+					if (FIoStoreTocResource::Read(FilenameOrDirectory, EIoStoreTocReadOptions::ReadDirectoryIndex, *Toc).IsOk())
+					{
+						FScopeLock Lock(&CollectionsLock);
+						if (EnumHasAnyFlags(Toc->Header.ContainerFlags, EIoContainerFlags::Encrypted))
+						{
+							RequiredKeys.Add(Toc->Header.EncryptionKeyGuid);
+						}
+						UnloadedVfs.Add(FVfs(Toc, FilenameOrDirectory));
+					}
+				}
+				return true;
+			});
+		}
 		return true;
 	}
 
@@ -169,11 +200,18 @@ public:
 		ParallelFor(VfsToMount.Num(), [&](int32 Index)
 		{
 			FVfs& Vfs = VfsToMount[Index];
-			Vfs.PakFile = new FPakFile(LowerLevel, *Vfs.PakFile->GetFilename(), false, true /*load index this time*/);
-			check(Vfs.PakFile->IsValid());
-			FString MountPoint = Vfs.PakFile->GetMountPoint();
-			NormalizeMountPoint(MountPoint);
-			Vfs.PakFile->SetMountPoint(*MountPoint);
+			if (Vfs.Type == EVfsType::Pak)
+			{
+				Vfs.PakFile = new FPakFile(LowerLevel, *Vfs.PakFile->GetFilename(), false, true /*load index this time*/);
+				check(Vfs.PakFile->IsValid());
+				FString MountPoint = Vfs.PakFile->GetMountPoint();
+				NormalizeMountPoint(MountPoint);
+				Vfs.PakFile->SetMountPoint(*MountPoint);
+			}
+			else
+			{
+				IoDispatcherFileBackend->Mount(*Vfs.Path, 0, FGuid(), FAES::FAESKey());
+			}
 			{
 				FScopeLock Lock(&CollectionsLock);
 				// @todo: Merge files
@@ -213,11 +251,19 @@ public:
 		ParallelFor(VfsToMount.Num(), [&](int32 Index)
 		{
 			FVfs& Vfs = VfsToMount[Index];
-			Vfs.PakFile = new FPakFile(LowerLevel, *Vfs.PakFile->GetFilename(), false, true /*load index this time*/);
-			check(Vfs.PakFile->IsValid());
-			FString MountPoint = Vfs.PakFile->GetMountPoint();
-			NormalizeMountPoint(MountPoint);
-			Vfs.PakFile->SetMountPoint(*MountPoint);
+			if (Vfs.Type == EVfsType::Pak)
+			{
+				Vfs.PakFile = new FPakFile(LowerLevel, *Vfs.PakFile->GetFilename(), false, true /*load index this time*/);
+				check(Vfs.PakFile->IsValid());
+				FString MountPoint = Vfs.PakFile->GetMountPoint();
+				NormalizeMountPoint(MountPoint);
+				Vfs.PakFile->SetMountPoint(*MountPoint);
+			}
+			else
+			{
+				FGuid EncryptionKeyGuid = Vfs.GetEncryptionKeyGuid();
+				IoDispatcherFileBackend->Mount(*Vfs.Path, 0, EncryptionKeyGuid, Keys.FindChecked(EncryptionKeyGuid));
+			}
 			{
 				FScopeLock Lock(&CollectionsLock);
 				// @todo: Merge files
@@ -244,6 +290,25 @@ public:
 
 	virtual IPlatformFile* GetLowerLevel() /*override*/ { return LowerLevel; }
 	virtual void SetLowerLevel(IPlatformFile* NewLowerLevel) /*override*/ { LowerLevel = NewLowerLevel; }
+	virtual const TCHAR* GetName() const override { return TEXT("Custom"); }
+	virtual bool FileExists(const TCHAR* Filename) override { return false; }
+	virtual int64 FileSize(const TCHAR* Filename) override { return -1; }
+	virtual bool DeleteFile(const TCHAR* Filename) override { return false; }
+	virtual bool IsReadOnly(const TCHAR* Filename) override { return false; }
+	virtual bool MoveFile(const TCHAR* To, const TCHAR* From) override { return false; }
+	virtual bool SetReadOnly(const TCHAR* Filename, bool bNewReadOnlyValue) override { return false; }
+	virtual FDateTime GetTimeStamp(const TCHAR* Filename) override { return FDateTime::MinValue(); }
+	virtual void SetTimeStamp(const TCHAR* Filename, FDateTime DateTime) override {}
+	virtual FDateTime GetAccessTimeStamp(const TCHAR* Filename) override { return FDateTime::MinValue(); }
+	virtual FString GetFilenameOnDisk(const TCHAR* Filename) override { return TEXT(""); }
+	virtual IFileHandle* OpenRead(const TCHAR* Filename, bool bAllowWrite) override { return nullptr; }
+	virtual IFileHandle* OpenWrite(const TCHAR* Filename, bool bAppend, bool bAllowRead) override { return nullptr; }
+	virtual bool DirectoryExists(const TCHAR* Directory) override { return false; }
+	virtual bool CreateDirectory(const TCHAR* Directory) override { return false; }
+	virtual bool DeleteDirectory(const TCHAR* Directory) override { return false; }
+	virtual FFileStatData GetStatData(const TCHAR* FilenameOrDirectory) override { return FFileStatData(); }
+	virtual bool IterateDirectory(const TCHAR* Directory, FDirectoryVisitor& Visitor) override { return false; }
+	virtual bool IterateDirectoryStat(const TCHAR* Directory, FDirectoryStatVisitor& Visitor) override { return false; }
 
 private:
 	static void NormalizeMountPoint(FString& MountPoint)
